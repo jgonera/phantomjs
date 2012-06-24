@@ -33,44 +33,70 @@
   THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
+phantom.__defineErrorSetter__ = function(obj, page) {
+    var handler;
+    var signal = page.javaScriptErrorSent;
+
+    obj.__defineSetter__('onError', function(f) {
+        if (handler && typeof handler === 'function') {
+            try { signal.disconnect(handler); }
+            catch (e) {}
+        }
+
+        if (typeof f === 'function') {
+            handler = function(message, stack) {
+              stack = JSON.parse(stack).map(function(item) {
+                  return { file: item.url, line: item.lineNumber, function: item.functionName }
+              });
+
+              f(message, stack);
+            };
+            signal.connect(handler);
+        } else {
+            handler = null;
+        }
+    });
+};
+
+phantom.__defineErrorSetter__(phantom, phantom.page);
+
+// TODO: Make this output to STDERR
+phantom.defaultErrorHandler = function(message, stack) {
+    console.log(message + "\n");
+
+    stack.forEach(function(item) {
+        var message = item.file + ":" + item.line;
+        if (item.function)
+            message += " in " + item.function;
+        console.log("  " + message);
+    });
+};
+
+phantom.callback = function(callback) {
+    var ret = phantom.createCallback();
+    ret.called.connect(function(args) {
+        var retVal = callback.apply(this, args);
+        ret.returnValue = retVal;
+    });
+    return ret;
+};
+
+phantom.onError = phantom.defaultErrorHandler;
+
 (function() {
     // CommonJS module implementation follows
 
     window.global = window;
+    // fs is loaded at the end, when everything is ready
+    var fs;
+
+    var cache = {};
     var nativeModules = ['fs', 'webpage', 'webserver', 'system'];
     // use getters to initialize lazily
     var nativeExports = {
         get fs() { return phantom.createFilesystem(); },
         get system() { return phantom.createSystem(); }
     };
-
-    function nativeRequire(request) {
-        var code = phantom.loadModuleSource(request);
-        var func = new Function("exports", "window", code);
-        var exports = nativeExports[request] || {};
-        func.call({}, exports, {});
-        return exports;
-    }
-
-    function dirname(path) {
-        return path.replace(/\/[^\/]*\/?$/, '');
-    }
-
-    function basename(path) {
-        return path.replace(/.*\//, '');
-    }
-
-    function joinPath() {
-        var args = Array.prototype.slice.call(arguments);
-        return args.join(fs.separator);
-    }
-
-    var fs = nativeRequire('fs');
-
-    var rootPath = fs.absolute(phantom.libraryPath);
-    var mainScript = joinPath(rootPath, basename(nativeRequire('system').args[0]) || 'repl');
-
-    var cache = {};
     var extensions = {
         '.js': function(module, filename) {
             var code = fs.read(filename);
@@ -93,6 +119,36 @@
             module.exports = JSON.parse(fs.read(filename));
         }
     };
+    
+    function nativeRequire(request) {
+        var code, module, filename = 'phantomjs://modules/' + request + '.js';
+        
+        if (cache.hasOwnProperty(filename)) {
+            return cache[filename].exports;
+        }
+        
+        code = phantom.readNativeModule(request);
+        module = new Module(filename);
+
+        cache[filename] = module;
+        module.exports = nativeExports[request] || {};
+        module._compile(code);
+
+        return module.exports;
+    }
+
+    function dirname(path) {
+        return path.replace(/\/[^\/]*\/?$/, '');
+    }
+
+    function basename(path) {
+        return path.replace(/.*\//, '');
+    }
+
+    function joinPath() {
+        var args = Array.prototype.slice.call(arguments);
+        return args.join(fs.separator);
+    }
 
     function tryFile(path) {
         if (fs.isFile(path)) return path;
@@ -123,14 +179,18 @@
     }
 
     function Module(filename, stubs) {
-        this.id = this.filename = filename;
-        this.dirname = dirname(filename);
+        if (filename) this._setFilename(filename);
         this.exports = {};
         this.stubs = {};
         for (var name in stubs) {
             this.stubs[name] = stubs[name];
         }
     }
+
+    Module.prototype._setFilename = function(filename) {
+        this.id = this.filename = filename;
+        this.dirname = dirname(filename);
+    };
 
     Module.prototype._getPaths = function(request) {
         var paths = [], dir;
@@ -212,65 +272,22 @@
             return cache[filename].exports;
         }
 
-        var module = new Module(filename, this.stubs);
+        module = new Module(filename, this.stubs);
         cache[filename] = module;
         module._load();
 
         return module.exports;
     };
 
-    window.require = new Module(mainScript)._getRequire();
+    (function() {
+        var cwd, mainFilename, mainModule = new Module();
+        window.require = mainModule._getRequire();
+        fs = nativeRequire('fs');
+        cwd = fs.absolute(phantom.libraryPath);
+        mainFilename = joinPath(cwd, basename(nativeRequire('system').args[0]) || 'repl');
+        mainModule._setFilename(mainFilename);
+    }());
 }());
-
-phantom.__defineErrorSetter__ = function(obj, page) {
-    var handler;
-    var signal = page.javaScriptErrorSent;
-
-    obj.__defineSetter__('onError', function(f) {
-        if (handler && typeof handler === 'function') {
-            try { signal.disconnect(handler); }
-            catch (e) {}
-        }
-
-        if (typeof f === 'function') {
-            handler = function(message, stack) {
-              stack = JSON.parse(stack).map(function(item) {
-                  return { file: item.url, line: item.lineNumber, function: item.functionName }
-              });
-
-              f(message, stack);
-            };
-            signal.connect(handler);
-        } else {
-            handler = null;
-        }
-    });
-};
-
-phantom.__defineErrorSetter__(phantom, phantom.page);
-
-// TODO: Make this output to STDERR
-phantom.defaultErrorHandler = function(message, stack) {
-    console.log(message + "\n");
-
-    stack.forEach(function(item) {
-        var message = item.file + ":" + item.line;
-        if (item.function)
-            message += " in " + item.function;
-        console.log("  " + message);
-    });
-};
-
-phantom.callback = function(callback) {
-    var ret = phantom.createCallback();
-    ret.called.connect(function(args) {
-        var retVal = callback.apply(this, args);
-        ret.returnValue = retVal;
-    });
-    return ret;
-};
-
-phantom.onError = phantom.defaultErrorHandler;
 
 // Legacy way to use WebPage
 window.WebPage = require('webpage').create;
