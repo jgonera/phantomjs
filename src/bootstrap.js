@@ -33,46 +33,39 @@
   THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-
 (function() {
+    // CommonJS module implementation follows
+
     window.global = window;
+    var nativeModules = ['fs', 'webpage', 'webserver', 'system'];
+    // use getters to initialize lazily
+    var nativeExports = {
+        get fs() { return phantom.createFilesystem(); },
+        get system() { return phantom.createSystem(); }
+    };
 
-    function nativeRequire(name) {
-        var code, func, exports;
-
-        if (name === 'webpage' || name === 'fs' || name === 'webserver' || name === 'system') {
-            code = phantom.loadModuleSource(name);
-            func = new Function("exports", "window", code);
-            exports = {};
-            if (name === 'fs') {
-                exports = phantom.createFilesystem();
-            } else if (name === 'system') {
-                exports = phantom.createSystem();
-            }
-            func.call({}, exports, {});
-            return exports;
-        }
-
-        if (typeof exports === 'undefined') {
-            throw 'Unknown module ' + name + ' for require()';
-        }
+    function nativeRequire(request) {
+        var code = phantom.loadModuleSource(request);
+        var func = new Function("exports", "window", code);
+        var exports = nativeExports[request] || {};
+        func.call({}, exports, {});
+        return exports;
     }
 
     function dirname(path) {
         return path.replace(/\/[^\/]*\/?$/, '');
-    };
+    }
 
     function basename(path) {
         return path.replace(/.*\//, '');
-    };
+    }
 
     function joinPath() {
         var args = Array.prototype.slice.call(arguments);
         return args.join(fs.separator);
-    };
+    }
 
     var fs = nativeRequire('fs');
-    var phantomModules = ['fs', 'webpage', 'webserver', 'system'];
 
     var rootPath = fs.absolute(phantom.libraryPath);
     var mainScript = joinPath(rootPath, basename(nativeRequire('system').args[0]) || 'repl');
@@ -107,8 +100,7 @@
     }
 
     function tryExtensions(path) {
-        var filename;
-        var exts = Object.keys(extensions);
+        var filename, exts = Object.keys(extensions);
         for (var i=0; i<exts.length; ++i) {
             filename = tryFile(path + exts[i]);
             if (filename) return filename;
@@ -153,7 +145,6 @@
                 paths.push(joinPath(dir, 'node_modules', request));
                 dir = dirname(dir);
             }
-            //paths.push(joinPath(nodifyPath, 'modules', request));
         }
 
         return paths;
@@ -186,7 +177,7 @@
     };
 
     Module.prototype._load = function() {
-        var ext = this.filename.match(/\.[^.]+$/);
+        var ext = this.filename.match(/\.[^.]+$/)[0];
         if (!ext) ext = '.js';
         extensions[ext](this, this.filename);
     };
@@ -196,20 +187,25 @@
     };
 
     Module.prototype.require = function(request) {
-        if (phantomModules.indexOf(request) !== -1) {
-            return nativeRequire(request);
-        }
+        var filename, module, error;
 
+        // first see if there are any stubs for the request
         if (this.stubs.hasOwnProperty(request)) {
             return this.stubs[request].exports;
         }
 
-        var filename = this._getFilename(request);
+        // then try loading a native module
+        if (nativeModules.indexOf(request) !== -1) {
+            return nativeRequire(request);
+        }
+
+        // else look for a file
+        filename = this._getFilename(request);
         if (!filename) {
-            var e = new Error("Cannot find module '" + request + "'");
-            e.fileName = this.filename;
-            e.line = '';
-            throw e;
+            error = new Error("Cannot find module '" + request + "'");
+            error.fileName = this.filename;
+            error.line = '';
+            throw error;
         }
 
         if (cache.hasOwnProperty(filename)) {
